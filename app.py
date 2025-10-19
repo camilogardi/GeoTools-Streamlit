@@ -10,6 +10,15 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import streamlit as st
 
+# colocar inmediatamente después de los imports
+try:
+    import time as _time  # usar nombre privado para evitar colisiones
+    perf_counter = _time.perf_counter
+except Exception:
+    # fallback: usar time.time() si perf_counter no está disponible
+    import time as _time
+    perf_counter = _time.time
+
 st.set_page_config(page_title="Iz Influence App", layout="wide")
 st.title("Iz / sigma (sobrecarga rectangular) — App (compute separado)")
 
@@ -202,5 +211,6 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
             st.pyplot(fig)
         except Exception as e:
             st.error(f"Error generando perfil: {e}")
+
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
