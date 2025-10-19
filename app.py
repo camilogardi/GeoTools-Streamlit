@@ -1,17 +1,14 @@
 """
-Streamlit app corregido y autocontenido.
+Streamlit app actualizado (usa la versión de cálculo proporcionada).
 
-Cambios aplicados:
-- Añadí imports faltantes (tempfile, os, time).
-- Incluí implementaciones necesarias: get_ryb_cmap, generate_grid,
-  compute_Iz_grid_gauss, cached_compute y funciones de graficado.
-- Evité el uso inseguro de time.perf_counter() accediendo a perf_counter
-  mediante un wrapper seguro; ahora medimos tiempo correctamente.
-- Corregí el bloque de compute_btn para medir elapsed y guardarlo en session_state.
-- El cálculo queda cacheado con @st.cache_data; las gráficas usan datos en session_state
-  o cargados desde archivo .npz/.csv sin volver a calcular.
+Este archivo:
+- incluye las funciones de cálculo solicitadas (generate_grid, compute_Iz_grid,
+  compute_influence_dataframe, df_to_grid)
+- provee funciones de graficado que usan X,Y,Z,Iz en memoria
+- separa cálculo (cacheado) y graficado; guarda resultados en st.session_state
+- añade paleta azul->amarillo->rojo por defecto para los contornos
 
-Ejecuta con:
+Ejecutar:
   pip install streamlit numpy pandas matplotlib
   streamlit run app.py
 """
@@ -25,6 +22,269 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import streamlit as st
 
+# --- perf_counter seguro (evita colisiones con nombre 'time') ---
+try:
+    import time as _time
+    perf_counter = getattr(_time, "perf_counter", _time.time)
+except Exception:
+    import time as _time
+    perf_counter = _time.time
+# ---------------------------------------------------------------
+
+# -------------------------
+# Cálculo (versión solicitada)
+# -------------------------
+def generate_grid(x_limits, y_limits, z_limits, nx=61, ny=61, nz=30) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Genera malla X (nx,ny), Y (nx,ny) y vector Z (nz,).
+    x_limits, y_limits, z_limits: tuple(min,max) o arrays 1D.
+    """
+    def make_axis(arg, n):
+        arr = np.asarray(arg)
+        if arr.size == 2:
+            return np.linspace(arr[0], arr[1], n)
+        elif arr.ndim == 1:
+            return arr
+        else:
+            raise ValueError("Los límites deben ser (min,max) o un array 1D.")
+
+    x = make_axis(x_limits, nx)
+    y = make_axis(y_limits, ny)
+    z = make_axis(z_limits, nz)
+
+    if np.any(z <= 0):
+        raise ValueError("Todos los valores de z deben ser mayores que 0 (profundidad positiva).")
+
+    X2, Y2 = np.meshgrid(x, y, indexing='xy')
+    X = X2.T  # shape (nx, ny)
+    Y = Y2.T
+    return X, Y, np.asarray(z)
+
+
+def compute_Iz_grid(Lx, Ly, x0, y0, X, Y, Z, integ_nx=120, integ_ny=120, chunk_size=200000) -> np.ndarray:
+    """
+    Calcula Iz (nx,ny,nz) integrando la solución de Boussinesq sobre la placa
+    rectangular Lx (eje x) x Ly (eje y) centrada en (x0,y0).
+    """
+    x_vec = X[:, 0]
+    y_vec = Y[0, :]
+    nx_eval = x_vec.size
+    ny_eval = y_vec.size
+    nz_eval = Z.size
+
+    xi = np.linspace(x0 - Lx/2.0, x0 + Lx/2.0, integ_nx)
+    yj = np.linspace(y0 - Ly/2.0, y0 + Ly/2.0, integ_ny)
+    dx = xi[1] - xi[0]
+    dy = yj[1] - yj[0]
+    area_elem = dx * dy
+
+    XI, YJ = np.meshgrid(xi, yj, indexing='xy')
+    XIf = XI.ravel()
+    YJf = YJ.ravel()
+
+    Xf = X.ravel()
+    Yf = Y.ravel()
+    P = Xf.size
+
+    Iz_all = np.zeros((P, nz_eval), dtype=float)
+    const = 3.0 / (2.0 * np.pi)
+
+    for k, z_k in enumerate(Z):
+        z3 = z_k**3
+        start = 0
+        while start < P:
+            end = min(start + int(chunk_size), P)
+            X_chunk = Xf[start:end]
+            Y_chunk = Yf[start:end]
+            rx = XIf[:, None] - X_chunk[None, :]
+            ry = YJf[:, None] - Y_chunk[None, :]
+            r2 = rx*rx + ry*ry
+            denom = (r2 + z_k*z_k)**2.5
+            integrand = (const * z3) / denom
+            Iz_chunk = np.sum(integrand, axis=0) * area_elem
+            Iz_all[start:end, k] = Iz_chunk
+            start = end
+
+    Iz = Iz_all.reshape((nx_eval, ny_eval, nz_eval))
+    return Iz
+
+
+def compute_influence_dataframe(Lx, Ly, x0, y0,
+                                x_limits, y_limits, z_limits,
+                                nx=61, ny=61, nz=30,
+                                integ_nx=120, integ_ny=120, chunk_size=200000,
+                                q_kpa=100.0) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Genera malla, calcula Iz y arma un DataFrame con columnas:
+    ['x','y','z','Iz','sigma_Pa','sigma_kPa'].
+
+    Retorna: df, X, Y, Z, Iz
+    """
+    X, Y, Z = generate_grid(x_limits, y_limits, z_limits, nx, ny, nz)
+    Iz = compute_Iz_grid(Lx, Ly, x0, y0, X, Y, Z, integ_nx, integ_ny, chunk_size)
+
+    q_pa = float(q_kpa) * 1e3
+    nx_eval, ny_eval, nz_eval = Iz.shape
+
+    # Construir vectores para DataFrame (orden consistente: recorrer puntos de planta y luego z)
+    # Usamos el mismo orden que Iz.ravel(): Iz.ravel() itera sobre x (fast), y, z (slow)
+    Xf = np.repeat(X.ravel()[:, None], nz_eval, axis=1).ravel()
+    Yf = np.repeat(Y.ravel()[:, None], nz_eval, axis=1).ravel()
+    Zf = np.tile(Z, X.ravel().size)
+    Izf = Iz.ravel()
+    sigma_pa = Izf * q_pa
+    sigma_kpa = sigma_pa / 1e3
+
+    df = pd.DataFrame({
+        'x': Xf,
+        'y': Yf,
+        'z': Zf,
+        'Iz': Izf,
+        'sigma_Pa': sigma_pa,
+        'sigma_kPa': sigma_kpa
+    })
+    return df, X, Y, Z, Iz
+
+
+def df_to_grid(df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Reconstruye X, Y, Z e Iz (nx,ny,nz) desde el DataFrame df que contiene
+    las columnas 'x','y','z','Iz'. Asume que la malla es cartesian product
+    (valores completos para cada combinación).
+    """
+    # Obtener coordenadas únicas ordenadas
+    x_unique = np.sort(df['x'].unique())
+    y_unique = np.sort(df['y'].unique())
+    z_unique = np.sort(df['z'].unique())
+
+    nx = x_unique.size
+    ny = y_unique.size
+    nz = z_unique.size
+
+    # Construir X,Y mallas
+    X2, Y2 = np.meshgrid(x_unique, y_unique, indexing='xy')
+    X = X2.T
+    Y = Y2.T
+    Z = z_unique
+
+    # Reconstruir Iz por niveles de z (pivot para cada z)
+    Iz = np.empty((nx, ny, nz), dtype=float)
+    for k, zval in enumerate(z_unique):
+        dfk = df[df['z'] == zval]
+        # pivot index=x, columns=y -> values Iz
+        pivot = dfk.pivot(index='x', columns='y', values='Iz')
+        # Asegurar orden de filas/columnas
+        pivot = pivot.reindex(index=x_unique, columns=y_unique)
+        Iz[:, :, k] = pivot.values
+
+    return X, Y, Z, Iz
+
+
+# -------------------------
+# Colormap y graficado
+# -------------------------
+def get_ryb_cmap(name: str = "ryb", ncolors: int = 256, reverse: bool = False):
+    """Paleta azul -> amarillo -> rojo (low -> high)."""
+    colors = ["blue", "yellow", "red"]
+    cmap = LinearSegmentedColormap.from_list(name, colors, N=ncolors)
+    return cmap.reversed() if reverse else cmap
+
+
+def plot_sigma_xz_from_grid(X, Y, Z, Iz, q_kpa, y_coord, cmap=None, vmin=None, vmax=None, levels=20, figsize=(8, 5)):
+    if cmap is None:
+        cmap = get_ryb_cmap()
+    x_vec = X[:, 0]
+    y_vec = Y[0, :]
+    if not (y_vec.min() <= y_coord <= y_vec.max()):
+        raise ValueError("y_coord fuera de rango")
+    nx, ny, nz = Iz.shape
+    Iz_xz = np.empty((nx, nz), dtype=float)
+    for k in range(nz):
+        Iz_xz[:, k] = np.array([np.interp(y_coord, y_vec, Iz[ix, :, k]) for ix in range(nx)])
+    sigma_xz_kpa = Iz_xz * float(q_kpa)
+    Xg, Zg = np.meshgrid(x_vec, Z, indexing="xy")
+    V = sigma_xz_kpa.T
+    fig, ax = plt.subplots(figsize=figsize)
+    cf = ax.contourf(Xg, Zg, V, levels=levels, cmap=cmap, vmin=vmin, vmax=vmax)
+    fig.colorbar(cf, ax=ax).set_label("sigma_z (kPa)")
+    ax.set_xlabel("x (m)")
+    ax.set_ylabel("Profundidad z (m)")
+    ax.set_title(f"sigma (kPa) corte x-z en y={y_coord:.3f} m")
+    ax.invert_yaxis()
+    return fig
+
+
+def plot_sigma_yz_from_grid(X, Y, Z, Iz, q_kpa, x_coord, cmap=None, vmin=None, vmax=None, levels=20, figsize=(8, 5)):
+    if cmap is None:
+        cmap = get_ryb_cmap()
+    x_vec = X[:, 0]
+    y_vec = Y[0, :]
+    if not (x_vec.min() <= x_coord <= x_vec.max()):
+        raise ValueError("x_coord fuera de rango")
+    nx, ny, nz = Iz.shape
+    Iz_yz = np.empty((ny, nz), dtype=float)
+    for k in range(nz):
+        Iz_yz[:, k] = np.array([np.interp(x_coord, x_vec, Iz[:, jy, k]) for jy in range(ny)])
+    sigma_yz_kpa = Iz_yz * float(q_kpa)
+    Yg, Zg = np.meshgrid(y_vec, Z, indexing="xy")
+    V = sigma_yz_kpa.T
+    fig, ax = plt.subplots(figsize=figsize)
+    cf = ax.contourf(Yg, Zg, V, levels=levels, cmap=cmap, vmin=vmin, vmax=vmax)
+    fig.colorbar(cf, ax=ax).set_label("sigma_z (kPa)")
+    ax.set_xlabel("y (m)")
+    ax.set_ylabel("Profundidad z (m)")
+    ax.set_title(f"sigma (kPa) corte y-z en x={x_coord:.3f} m")
+    ax.invert_yaxis()
+    return fig
+
+
+def plot_sigma_profile_from_grid(X, Y, Z, Iz, q_kpa, x_coord, y_coord, method="linear", figsize=(6, 4), color="k"):
+    x_vec = X[:, 0]
+    y_vec = Y[0, :]
+    nx, ny, nz = Iz.shape
+    if method == "nearest":
+        d2 = (X - x_coord) ** 2 + (Y - y_coord) ** 2
+        idx = np.unravel_index(np.argmin(d2.ravel()), X.shape)
+        Iz_point = Iz[idx[0], idx[1], :]
+        sigma = Iz_point * float(q_kpa)
+    else:
+        sigma = np.empty(nz, dtype=float)
+        for k in range(nz):
+            Iz_x_at_y = np.array([np.interp(y_coord, y_vec, Iz[ix, :, k]) for ix in range(nx)])
+            Iz_xy = np.interp(x_coord, x_vec, Iz_x_at_y)
+            sigma[k] = Iz_xy * float(q_kpa)
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(sigma, Z, marker="o", color=color)
+    ax.set_xlabel("sigma_z (kPa)")
+    ax.set_ylabel("Profundidad z (m)")
+    ax.set_title(f"Perfil sigma(z) en (x={x_coord:.3f}, y={y_coord:.3f})")
+    ax.invert_yaxis()
+    ax.grid(True)
+    return fig, Z, sigma
+
+
+# -------------------------
+# Cached compute wrapper (uses compute_influence_dataframe)
+# -------------------------
+@st.cache_data(show_spinner=False)
+def cached_compute_wrapper(Lx, Ly, x0, y0,
+                           x_min, x_max, y_min, y_max, z_min, z_max,
+                           nx, ny, nz, method, nq, integ_nx, integ_ny, chunk_size, q_kpa):
+    """
+    Wrapper cacheado para ejecutar compute_influence_dataframe con los parámetros.
+    Retorna df, X, Y, Z, Iz
+    """
+    # method is kept for API compatibility; current implementation uses integ_nx/integ_ny
+    df, X, Y, Z, Iz = compute_influence_dataframe(Lx, Ly, x0, y0,
+                                                  (x_min, x_max), (y_min, y_max), (z_min, z_max),
+                                                  nx=nx, ny=ny, nz=nz,
+                                                  integ_nx=(integ_nx if integ_nx is not None else int(nq*10)),
+                                                  integ_ny=(integ_ny if integ_ny is not None else int(nq*10)),
+                                                  chunk_size=chunk_size,
+                                                  q_kpa=q_kpa)
+    return df, X, Y, Z, Iz
+
+
 # -------------------------
 # Streamlit UI
 # -------------------------
@@ -33,30 +293,31 @@ st.title("Iz / sigma (sobrecarga rectangular) — App (compute separado)")
 
 with st.sidebar:
     st.header("Placa y malla")
-    Lx = st.number_input("Lx (m) — dimensión en x", value=3.0, step=0.1, format="%.3f")
-    Ly = st.number_input("Ly (m) — dimensión en y", value=4.5, step=0.1, format="%.3f")
+    Lx = st.number_input("Lx (m) — dimensión en x", value=2.0, step=0.1, format="%.3f")
+    Ly = st.number_input("Ly (m) — dimensión en y", value=1.5, step=0.1, format="%.3f")
     x0 = st.number_input("x0 (m) — centro placa", value=0.0, format="%.3f")
     y0 = st.number_input("y0 (m) — centro placa", value=0.0, format="%.3f")
 
     st.markdown("**Malla de evaluación**")
-    x_min = st.number_input("x min (m)", value=-5.0, format="%.3f")
-    x_max = st.number_input("x max (m)", value=5.0, format="%.3f")
-    y_min = st.number_input("y min (m)", value=-7.0, format="%.3f")
-    y_max = st.number_input("y max (m)", value=7.0, format="%.3f")
-    z_min = st.number_input("z min (m) > 0", value=0.5, format="%.3f")
-    z_max = st.number_input("z max (m)", value=15.0, format="%.3f")
+    x_min = st.number_input("x min (m)", value=-3.0, format="%.3f")
+    x_max = st.number_input("x max (m)", value=3.0, format="%.3f")
+    y_min = st.number_input("y min (m)", value=-3.0, format="%.3f")
+    y_max = st.number_input("y max (m)", value=3.0, format="%.3f")
+    z_min = st.number_input("z min (m) > 0", value=0.2, format="%.3f")
+    z_max = st.number_input("z max (m)", value=5.0, format="%.3f")
 
     nx = st.slider("nx (puntos en x)", min_value=21, max_value=161, value=61, step=10)
     ny = st.slider("ny (puntos en y)", min_value=21, max_value=161, value=61, step=10)
     nz = st.slider("nz (niveles z)", min_value=6, max_value=101, value=30, step=2)
 
     st.markdown("**Integración**")
-    method = st.selectbox("Método de integración", options=["gauss (recomendado)"])
-    nq = st.slider("n puntos Gauss por dimensión (nq)", min_value=4, max_value=24, value=12)
+    nq = st.slider("n puntos Gauss por dimensión (nq, usado para estimar integ_n)", min_value=4, max_value=24, value=12)
+    integ_nx = st.number_input("integ_nx (trap equiv)", value=120, min_value=10, step=10)
+    integ_ny = st.number_input("integ_ny (trap equiv)", value=120, min_value=10, step=10)
     chunk_size = st.number_input("chunk_size (puntos eval. por bloque)", value=200000, min_value=1000, step=1000)
 
     st.markdown("**Sobrecarga**")
-    q_kpa = st.number_input("q (kPa)", value=150.0, step=1.0, format="%.3f")
+    q_kpa = st.number_input("q (kPa)", value=100.0, step=1.0, format="%.3f")
 
     st.markdown("**Colormap / visualización**")
     invert_cmap = st.checkbox("Invertir colormap (rojo→azul)", value=False)
@@ -90,7 +351,7 @@ def load_npz_to_session(npz_bytes):
     return df, X, Y, Z, Iz
 
 
-# Load button behavior
+# Load file behavior
 if load_file is not None:
     if load_file.type == "application/x-npz" or load_file.name.endswith(".npz"):
         try:
@@ -103,8 +364,6 @@ if load_file is not None:
         try:
             df_csv = pd.read_csv(load_file)
             # reconstruct grid (assume full cartesian)
-            X_loaded, Y_loaded, Z_loaded, Iz_loaded = None, None, None, None
-            # Try to reconstruct using df_to_grid-like procedure
             x_unique = np.sort(df_csv["x"].unique())
             y_unique = np.sort(df_csv["y"].unique())
             z_unique = np.sort(df_csv["z"].unique())
@@ -112,8 +371,8 @@ if load_file is not None:
             X_loaded = X2.T
             Y_loaded = Y2.T
             Z_loaded = z_unique
-            nx = x_unique.size; ny = y_unique.size; nz_ = z_unique.size
-            Iz_loaded = np.empty((nx, ny, nz_), dtype=float)
+            nx_u = x_unique.size; ny_u = y_unique.size; nz_u = z_unique.size
+            Iz_loaded = np.empty((nx_u, ny_u, nz_u), dtype=float)
             for k, zval in enumerate(z_unique):
                 dfk = df_csv[df_csv["z"] == zval]
                 pivot = dfk.pivot(index="x", columns="y", values="Iz")
@@ -130,8 +389,9 @@ if compute_btn:
     try:
         with st.spinner("Calculando Iz ... puede tardar según parámetros..."):
             start = perf_counter()
-            df, X, Y, Z, Iz = cached_compute(Lx, Ly, x0, y0, x_min, x_max, y_min, y_max, z_min, z_max,
-                                             nx, ny, nz, method, nq, None, None, chunk_size, q_kpa)
+            df, X, Y, Z, Iz = cached_compute_wrapper(Lx, Ly, x0, y0, x_min, x_max, y_min, y_max,
+                                                     z_min, z_max, nx, ny, nz,
+                                                     "gauss", nq, integ_nx, integ_ny, int(chunk_size), q_kpa)
             elapsed = perf_counter() - start
 
         st.session_state["results"] = (df, X, Y, Z, Iz)
@@ -229,6 +489,7 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
 
 
 
