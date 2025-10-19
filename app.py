@@ -254,7 +254,7 @@ def plot_sigma_profile_from_grid(X, Y, Z, Iz, q_kpa, x_coord, y_coord, method="l
             Iz_xy = np.interp(x_coord, x_vec, Iz_x_at_y)
             sigma[k] = Iz_xy * float(q_kpa)
     fig, ax = plt.subplots(figsize=figsize)
-    ax.plot(sigma, Z, marker="o", color=color)
+    ax.plot(sigma, Z, color=color)
     ax.set_xlabel("sigma_z (kPa)")
     ax.set_ylabel("Profundidad z (m)")
     ax.set_title(f"Perfil sigma(z) en (x={x_coord:.3f}, y={y_coord:.3f})")
@@ -489,4 +489,5 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
 
