@@ -221,7 +221,7 @@ def plot_sigma_yz_from_grid(X, Y, Z, Iz, q_kpa, x_coord, cmap=None, vmin=None, v
     return fig
 
 
-def plot_sigma_profile_from_grid(X, Y, Z, Iz, q_kpa, x_coord, y_coord, method="linear", figsize=(6, 4), color="k"):
+def plot_sigma_profile_from_grid(X, Y, Z, Iz, q_kpa, x_coord, y_coord, method="linear", figsize=(4, 6), color="k"):
     x_vec = X[:, 0]
     y_vec = Y[0, :]
     nx, ny, nz = Iz.shape
@@ -450,6 +450,7 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
 
 
 
