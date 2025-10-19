@@ -118,12 +118,12 @@ if load_file is not None:
 
 # Compute button behavior (separate calculation)
 if compute_btn:
-    start_t = time.perf_counter()
+    
     try:
         with st.spinner("Calculando Iz ... puede tardar según parámetros..."):
             df, X, Y, Z, Iz = cached_compute(Lx, Ly, x0, y0, x_min, x_max, y_min, y_max, z_min, z_max,
                                              nx, ny, nz, method, nq, None, None, chunk_size, q_kpa)
-        elapsed = time.perf_counter() - start_t
+        
         st.session_state["results"] = (df, X, Y, Z, Iz)
         st.session_state["compute_time_s"] = elapsed
         st.success(f"Cálculo completado en {elapsed:.2f} s. Resultados guardados en session_state.")
@@ -216,4 +216,5 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
 
