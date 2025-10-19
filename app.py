@@ -10,12 +10,14 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 import streamlit as st
 
-# colocar inmediatamente después de los imports
+# --- perf_counter seguro (añadir justo después de los imports) ---
 try:
-    import time as _time  # usar nombre privado para evitar colisiones
-    perf_counter = _time.perf_counter
+    # usar módulo time privado para evitar colisiones con variables llamadas `time`
+    import time as _time
+    # preferimos perf_counter si está disponible
+    perf_counter = getattr(_time, "perf_counter", _time.time)
 except Exception:
-    # fallback: usar time.time() si perf_counter no está disponible
+    # último recurso: time.time
     import time as _time
     perf_counter = _time.time
 
@@ -214,3 +216,4 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
