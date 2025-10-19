@@ -254,18 +254,18 @@ st.title("Iz / sigma (sobrecarga rectangular) — App (compute separado)")
 
 with st.sidebar:
     st.header("Placa y malla")
-    Lx = st.number_input("Lx (m) — dimensión en x", value=2.0, step=0.1, format="%.3f")
-    Ly = st.number_input("Ly (m) — dimensión en y", value=1.5, step=0.1, format="%.3f")
+    Lx = st.number_input("Lx (m) — dimensión en x", value=3.0, step=0.1, format="%.3f")
+    Ly = st.number_input("Ly (m) — dimensión en y", value=4.5, step=0.1, format="%.3f")
     x0 = st.number_input("x0 (m) — centro placa", value=0.0, format="%.3f")
     y0 = st.number_input("y0 (m) — centro placa", value=0.0, format="%.3f")
 
     st.markdown("**Malla de evaluación**")
-    x_min = st.number_input("x min (m)", value=-3.0, format="%.3f")
-    x_max = st.number_input("x max (m)", value=3.0, format="%.3f")
-    y_min = st.number_input("y min (m)", value=-3.0, format="%.3f")
-    y_max = st.number_input("y max (m)", value=3.0, format="%.3f")
-    z_min = st.number_input("z min (m) > 0", value=0.2, format="%.3f")
-    z_max = st.number_input("z max (m)", value=5.0, format="%.3f")
+    x_min = st.number_input("x min (m)", value=-5.0, format="%.3f")
+    x_max = st.number_input("x max (m)", value=5.0, format="%.3f")
+    y_min = st.number_input("y min (m)", value=-7.0, format="%.3f")
+    y_max = st.number_input("y max (m)", value=7.0, format="%.3f")
+    z_min = st.number_input("z min (m) > 0", value=0.5, format="%.3f")
+    z_max = st.number_input("z max (m)", value=15.0, format="%.3f")
 
     nx = st.slider("nx (puntos en x)", min_value=21, max_value=161, value=61, step=10)
     ny = st.slider("ny (puntos en y)", min_value=21, max_value=161, value=61, step=10)
@@ -277,7 +277,7 @@ with st.sidebar:
     chunk_size = st.number_input("chunk_size (puntos eval. por bloque)", value=200000, min_value=1000, step=1000)
 
     st.markdown("**Sobrecarga**")
-    q_kpa = st.number_input("q (kPa)", value=100.0, step=1.0, format="%.3f")
+    q_kpa = st.number_input("q (kPa)", value=150.0, step=1.0, format="%.3f")
 
     st.markdown("**Colormap / visualización**")
     invert_cmap = st.checkbox("Invertir colormap (rojo→azul)", value=False)
@@ -450,6 +450,7 @@ if st.button("Generar perfil sigma(z) (desde resultados)"):
 
 
 st.info("Consejo: guarda los resultados (.npz) si el cálculo tardó mucho y luego cárgalos en otra sesión para ver gráficos sin recalcular.")
+
 
 
 
